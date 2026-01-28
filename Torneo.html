@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<title>Torneo Svizzero / Italiano</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:Arial;max-width:900px;margin:auto;padding:20px}
+textarea,input,select{width:100%;padding:6px;margin-bottom:6px}
+button{padding:6px;margin:2px}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+th,td{border:1px solid #ccc;padding:6px;text-align:center}
+</style>
+</head>
+
+<body>
+
+<h2>Torneo Svizzero / Italiano</h2>
+
+<select id="type">
+  <option value="swiss">Torneo Svizzero</option>
+  <option value="roundrobin">Torneo Italiano</option>
+</select>
+
+<select id="roundtrip">
+  <option value="0">Solo andata</option>
+  <option value="1">Andata / Ritorno</option>
+</select>
+
+<textarea id="players" placeholder="Nome ELO (Mario 1500)"></textarea>
+<input id="rounds" type="number" value="6">
+
+<button onclick="createTournament()">Crea torneo</button>
+<button onclick="deleteTournament()">Elimina torneo</button>
+
+<hr>
+
+<div id="info"></div>
+<button onclick="nextRound()">Prossimo turno</button>
+<div id="pairings"></div>
+
+<h3>Classifica</h3>
+<div id="ranking"></div>
+
+<script>
+let tournament=null;
+const K=15;
+
+/* ===== ELO ===== */
+function expected(a,b){
+  return 1/(1+Math.pow(10,(b.elo-a.elo)/400));
+}
+
+/* ===== CREA TORNEO ===== */
+function createTournament(){
+  let raw=document.getElementById("players").value.split("\n").filter(x=>x);
+  let players=raw.map((r,i)=>{
+    let s=r.split(" ");
+    return{
+      num:i+1,
+      name:s.slice(0,-1).join(" "),
+      elo:+s.at(-1)||1500,
+      points:0,
+      history:[],
+      byeCount:0
+    };
+  });
+
+  tournament={
+    type:document.getElementById("type").value,
+    roundTrip:document.getElementById("roundtrip").value==="1",
+    players,
+    round:0,
+    maxRounds:+document.getElementById("rounds").value,
+    rounds:[]
+  };
+
+  if(tournament.type==="roundrobin")
+    tournament.rounds=generateRoundRobin(players,tournament.roundTrip);
+
+  updateInfo(); renderRanking();
+  document.getElementById("pairings").innerHTML="";
+}
+
+/* ===== BYE CORRETTO ===== */
+function assignBye(players){
+  let candidates=players
+    .filter(p=>p.byeCount===0)
+    .sort((a,b)=>a.points-b.points);
+
+  let bye=candidates[0]||players.sort((a,b)=>a.points-b.points)[0];
+  bye.byeCount++;
+  bye.points+=0.5;
+  return bye;
+}
+
+/* ===== PRIMO TURNO (ELO VICINI) ===== */
+function generateFirstRound(){
+  let s=[...tournament.players].sort((a,b)=>b.elo-a.elo);
+  let rounds=[];
+
+  if(s.length%2){
+    let bye=assignBye(s);
+    s=s.filter(p=>p!==bye);
+    rounds.push({bye:true,player:bye});
+  }
+
+  for(let i=0;i<s.length;i+=2){
+    rounds.push({white:s[i],black:s[i+1],result:null});
+  }
+  return rounds;
+}
+
+/* ===== TURNI SUCCESSIVI ===== */
+function generatePairings(){
+  let s=[...tournament.players].sort((a,b)=>b.points-a.points);
+  let used=new Set(), rounds=[];
+
+  if(s.length%2){
+    let bye=assignBye(s);
+    used.add(bye.name);
+    rounds.push({bye:true,player:bye});
+  }
+
+  for(let i=0;i<s.length;i++){
+    if(used.has(s[i].name))continue;
+    for(let j=i+1;j<s.length;j++){
+      if(!used.has(s[j].name)){
+        used.add(s[i].name); used.add(s[j].name);
+        rounds.push({white:s[i],black:s[j],result:null});
+        break;
+      }
+    }
+  }
+  return rounds;
+}
+
+/* ===== ROUND ROBIN ===== */
+function generateRoundRobin(players,rt){
+  let list=[...players];
+  if(list.length%2) list.push({name:"BYE"});
+  let rounds=[];
+  for(let r=0;r<list.length-1;r++){
+    let round=[];
+    for(let i=0;i<list.length/2;i++){
+      let a=list[i],b=list[list.length-1-i];
+      if(a.name!=="BYE"&&b.name!=="BYE")
+        round.push({white:a,black:b,result:null});
+    }
+    rounds.push(round);
+    list.splice(1,0,list.pop());
+  }
+  if(rt)
+    rounds=rounds.concat(rounds.map(r=>r.map(m=>({white:m.black,black:m.white,result:null}))));
+  return rounds;
+}
+
+/* ===== TURNI ===== */
+function nextRound(){
+  if(tournament.round>=tournament.maxRounds){
+    alert("Numero massimo di turni raggiunto");
+    return;
+  }
+
+  if(tournament.type==="swiss"){
+    tournament.round++;
+    tournament.rounds.push(
+      tournament.round===1 ? generateFirstRound() : generatePairings()
+    );
+    renderRound(tournament.rounds.at(-1));
+  }else{
+    renderRound(tournament.rounds[tournament.round]);
+    tournament.round++;
+  }
+  updateInfo();
+}
+
+/* ===== RISULTATI ===== */
+function assign(r,i,res){
+  let m=tournament.rounds[r][i];
+  if(m.bye)return;
+
+  if(m.result!==null) rollback(m);
+  m.result=res;
+  apply(m);
+  renderRanking();
+}
+
+function rollback(m){
+  let w=m.white,b=m.black;
+  let ew=expected(w,b), eb=expected(b,w);
+
+  if(m.result===1){w.points--; w.elo-=K*(1-ew); b.elo-=K*(0-eb);}
+  if(m.result===0){b.points--; b.elo-=K*(1-eb); w.elo-=K*(0-ew);}
+  if(m.result===0.5){
+    w.points-=0.5; b.points-=0.5;
+    w.elo-=K*(0.5-ew); b.elo-=K*(0.5-eb);
+  }
+  w.history.pop(); b.history.pop();
+}
+
+function apply(m){
+  let w=m.white,b=m.black;
+  let ew=expected(w,b), eb=expected(b,w);
+
+  if(m.result===1){
+    w.points++; w.elo+=K*(1-ew); b.elo+=K*(0-eb);
+    w.history.push(`+${b.num}B`);
+    b.history.push(`-${w.num}N`);
+  }
+  if(m.result===0){
+    b.points++; b.elo+=K*(1-eb); w.elo+=K*(0-ew);
+    b.history.push(`+${w.num}N`);
+    w.history.push(`-${b.num}B`);
+  }
+  if(m.result===0.5){
+    w.points+=0.5; b.points+=0.5;
+    w.elo+=K*(0.5-ew); b.elo+=K*(0.5-eb);
+    w.history.push(`=${b.num}B`);
+    b.history.push(`=${w.num}N`);
+  }
+}
+
+/* ===== RENDER ===== */
+function renderRound(p){
+  let h=`<h3>Turno ${tournament.round}</h3>
+  <table><tr><th>Bianco</th><th>Nero</th><th>Ris</th></tr>`;
+  p.forEach((m,i)=>{
+    if(m.bye)
+      h+=`<tr><td>${m.player.name}</td><td>BYE</td><td>0.5</td></tr>`;
+    else
+      h+=`<tr>
+      <td>${m.white.name} (${m.white.num})</td>
+      <td>${m.black.name} (${m.black.num})</td>
+      <td>
+      <button onclick="assign(${tournament.round-1},${i},1)">1–0</button>
+      <button onclick="assign(${tournament.round-1},${i},0.5)">½</button>
+      <button onclick="assign(${tournament.round-1},${i},0)">0–1</button>
+      </td></tr>`;
+  });
+  document.getElementById("pairings").innerHTML=h+"</table>";
+}
+
+function renderRanking(){
+  let h="<table><tr><th>#</th><th>Nome</th><th>P</th><th>ELO</th><th>Storico</th></tr>";
+  [...tournament.players].sort((a,b)=>b.points-a.points).forEach(p=>{
+    h+=`<tr>
+      <td>${p.num}</td>
+      <td>${p.name}</td>
+      <td>${p.points}</td>
+      <td>${Math.round(p.elo)}</td>
+      <td>${p.history.join(", ")}</td>
+    </tr>`;
+  });
+  document.getElementById("ranking").innerHTML=h+"</table>";
+}
+
+function updateInfo(){
+  document.getElementById("info").innerText=
+    `Turno ${tournament.round} / ${tournament.maxRounds}`;
+}
+
+function deleteTournament(){ location.reload(); }
+</script>
+
+</body>
+</html>
